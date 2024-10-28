@@ -64,6 +64,8 @@ func TestMain(t *testing.T) {
 	defer os.Unsetenv("REPO_URL")
 
 	// Run one tick of tuki
+	os.Setenv("MAX_TICKS", "1")
+	defer os.Unsetenv("MAX_TICKS")
 	main()
 
 	// Ensure that the state file was committed

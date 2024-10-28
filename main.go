@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
+
 	"github.com/google/uuid"
 
 	"tuki/internal"
@@ -22,18 +22,13 @@ import (
 )
 
 var (
-	config Config
-	state  State
+	config *internal.Config
+	state  *State
 )
-
-type Config struct {
-	RepoURL                  string
-	InProgressTimeoutMinutes int
-	StateFile                string
-}
 
 type State struct {
 	WorkerUUID string
+	RunNumber  int
 
 	Repository *git.Repository
 	Worktree   *git.Worktree
@@ -42,14 +37,8 @@ type State struct {
 }
 
 func main() {
-	config = Config{
-		RepoURL:                  getEnvOrFatal("REPO_URL"),
-		InProgressTimeoutMinutes: getEnvAsIntOrDefault("IN_PROGRESS_TIMEOUT_MINUTES", 60),
-		StateFile:                getEnvOrDefault("STATE_FILE", ".tuki/state.jsonl"),
-	}
-	state = State{
-		WorkerUUID: uuid.NewString(),
-	}
+	config = internal.LoadConfig()
+	state = NewState()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -62,9 +51,41 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx); err != nil {
-		log.Fatalf("Error: %v", err)
+	if err := setup(ctx); err != nil {
+		log.Fatalf("Setup Error: %v", err)
 	}
+
+	ticker := time.NewTicker(time.Duration(config.TickIntervalSeconds) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		if err := run(ctx); err != nil {
+			log.Fatalf("Run Error: %v", err)
+		}
+
+		if config.MaxTicks >= 0 && state.RunNumber >= config.MaxTicks {
+			cancel()
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			continue
+		}
+	}
+}
+
+func NewState() *State {
+	return &State{
+		WorkerUUID: uuid.NewString(),
+		RunNumber:  0,
+	}
+}
+
+func setup(ctx context.Context) error {
+	return executeStep(ctx, "Clone repository", cloneRepository)
 }
 
 func run(ctx context.Context) error {
@@ -72,7 +93,7 @@ func run(ctx context.Context) error {
 		name string
 		fn   func(context.Context) error
 	}{
-		{"Clone repository", cloneRepository},
+		{"Fetch repository", fetchRepository},
 		{"Read state file", readStateFile},
 		{"Update tasks state", updateTasksState},
 		{"Process tasks", processTasks},
@@ -90,35 +111,9 @@ func run(ctx context.Context) error {
 		}
 	}
 
+	state.RunNumber++
+
 	return nil
-}
-
-func getEnvOrFatal(key string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		log.Fatalf("Environment variable %s is not set", key)
-	}
-	return value
-}
-
-func getEnvAsIntOrDefault(key string, defaultValue int) int {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	intValue, err := strconv.Atoi(value)
-	if err != nil {
-		log.Fatalf("Environment variable %s is not a valid integer: %v", key, err)
-	}
-	return intValue
-}
-
-func getEnvOrDefault(key string, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	return value
 }
 
 func executeStep(ctx context.Context, name string, fn func(context.Context) error) error {
@@ -166,6 +161,28 @@ func cloneRepository(ctx context.Context) error {
 
 	state.Repository = repo
 	state.Worktree = worktree
+	return nil
+}
+
+func fetchRepository(ctx context.Context) error {
+	err := state.Repository.FetchContext(ctx, &git.FetchOptions{})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("failed to fetch repository: %w", err)
+	}
+
+	ref, err := state.Repository.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get head: %w", err)
+	}
+
+	err = state.Worktree.Reset(&git.ResetOptions{
+		Mode:   git.HardReset,
+		Commit: ref.Hash(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to reset worktree: %w", err)
+	}
+
 	return nil
 }
 
