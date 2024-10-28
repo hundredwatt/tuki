@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"syscall"
 	"time"
 
@@ -19,6 +19,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -37,8 +38,18 @@ type State struct {
 }
 
 func main() {
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp: true,
+	})
+
 	config = internal.LoadConfig()
 	state = NewState()
+
+	if config.Verbose {
+		log.SetLevel(log.DebugLevel)
+	} else {
+		log.SetLevel(log.InfoLevel)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -47,12 +58,12 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Received shutdown signal. Cancelling operations...")
+		log.Info("Received shutdown signal. Cancelling operations...")
 		cancel()
 	}()
 
 	if err := setup(ctx); err != nil {
-		log.Fatalf("Setup Error: %v", err)
+		log.Fatal("Setup Error: ", err)
 	}
 
 	ticker := time.NewTicker(time.Duration(config.TickIntervalSeconds) * time.Second)
@@ -60,10 +71,10 @@ func main() {
 
 	for {
 		if err := run(ctx); err != nil {
-			log.Fatalf("Run Error: %v", err)
+			log.Fatal("Run Error: ", err)
 		}
 
-		if config.MaxTicks >= 0 && state.RunNumber >= config.MaxTicks {
+		if config.MaxTicks >= 0 && (state.RunNumber-1) >= config.MaxTicks {
 			cancel()
 			return
 		}
@@ -80,7 +91,7 @@ func main() {
 func NewState() *State {
 	return &State{
 		WorkerUUID: uuid.NewString(),
-		RunNumber:  0,
+		RunNumber:  1,
 	}
 }
 
@@ -89,6 +100,8 @@ func setup(ctx context.Context) error {
 }
 
 func run(ctx context.Context) error {
+	log.Info("Running tick ", state.RunNumber)
+
 	steps := []struct {
 		name string
 		fn   func(context.Context) error
@@ -117,12 +130,12 @@ func run(ctx context.Context) error {
 }
 
 func executeStep(ctx context.Context, name string, fn func(context.Context) error) error {
-	log.Printf("Executing step: %s", name)
+	log.Debug("Executing step: ", name)
 	err := fn(ctx)
 	if err != nil {
-		log.Printf("Step '%s' failed: %v", name, err)
+		log.WithError(err).Error("Step '", name, "' failed")
 	} else {
-		log.Printf("Step '%s' completed successfully", name)
+		log.Debug("Step '", name, "' completed successfully")
 	}
 	return err
 }
@@ -145,7 +158,7 @@ func cloneRepository(ctx context.Context) error {
 	storage := memory.NewStorage()
 	filesystem := memfs.New()
 
-	fmt.Println("Cloning repository", config.RepoURL)
+	log.Info("Cloning repository ", config.RepoURL)
 
 	repo, err := git.CloneContext(ctx, storage, filesystem, &git.CloneOptions{
 		URL: config.RepoURL,
@@ -169,6 +182,10 @@ func fetchRepository(ctx context.Context) error {
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return fmt.Errorf("failed to fetch repository: %w", err)
 	}
+	if err == git.NoErrAlreadyUpToDate {
+		log.Info("Repository is already up to date")
+		return nil
+	}
 
 	ref, err := state.Repository.Head()
 	if err != nil {
@@ -188,7 +205,7 @@ func fetchRepository(ctx context.Context) error {
 
 func updateTasksState(ctx context.Context) error {
 	// Read tasks from repository
-	dir, err := state.Worktree.Filesystem.ReadDir("/")
+	dir, err := state.Worktree.Filesystem.ReadDir(config.ScriptsDir)
 	if err != nil {
 		return err
 	}
@@ -229,8 +246,10 @@ func processTasks(ctx context.Context) error {
 				task.InProgressAt = time.Now()
 				state.TaskStore.UpsertTask(task)
 
-				file, err := state.Worktree.Filesystem.Open("/" + task.Name)
+				file, err := state.Worktree.Filesystem.Open(path.Join(config.ScriptsDir, task.Name))
 				if err != nil {
+					log.WithError(err).Error("Task ", task.Name, " failed")
+
 					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to open file: %v", err)
 					state.TaskStore.UpsertTask(task)
@@ -240,20 +259,26 @@ func processTasks(ctx context.Context) error {
 
 				contents, err := io.ReadAll(file)
 				if err != nil {
+					log.WithError(err).Error("Task ", task.Name, " failed")
+
 					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to read file: %v", err)
 					state.TaskStore.UpsertTask(task)
 					continue
 				}
 
+				log.Info("Running task ", task.Name)
 				cmd := exec.Command("sh", "-c", string(contents))
-				cmd.Stderr = os.Stderr
-				cmd.Stdout = os.Stdout
+				cmd.Stderr = &prefixWriter{prefix: task.Name, level: "ERROR"}
+				cmd.Stdout = &prefixWriter{prefix: task.Name, level: "INFO"}
 				err = cmd.Run()
 				if err != nil {
+					log.WithError(err).Error("Task ", task.Name, " failed")
+
 					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to run command: %v\n", err)
 					state.TaskStore.UpsertTask(task)
+
 					continue
 				}
 
@@ -261,6 +286,8 @@ func processTasks(ctx context.Context) error {
 				state.TaskStore.UpsertTask(task)
 			case internal.StatusInProgress:
 				if time.Since(task.InProgressAt) > time.Duration(config.InProgressTimeoutMinutes)*time.Minute {
+					log.Warn("Task ", task.Name, " in progress for more than ", config.InProgressTimeoutMinutes, " minutes. Marking as failed.")
+
 					task.Status = internal.StatusFailed
 					task.ErrorMessage = "Task in progress for more than an hour"
 					state.TaskStore.UpsertTask(task)
@@ -318,4 +345,18 @@ func persistStateFile(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+type prefixWriter struct {
+	prefix string
+	level  string
+}
+
+func (w *prefixWriter) Write(p []byte) (n int, err error) {
+	if w.level == "ERROR" {
+		log.WithField("task", w.prefix).Error(string(p))
+	} else {
+		log.WithField("task", w.prefix).Info(string(p))
+	}
+	return len(p), nil
 }
