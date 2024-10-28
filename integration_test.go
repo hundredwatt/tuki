@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"tuki/internal"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,12 +77,12 @@ func TestMain(t *testing.T) {
 	cmd.Dir = bareRepoDir
 	output = must(cmd.Output())
 
-	tasksStore := must(LoadTaskStore(strings.NewReader(string(output))))
+	tasksStore := must(internal.LoadTaskStore(strings.NewReader(string(output))))
 	task, ok := tasksStore.GetTask("fails.sh")
 	assert.True(t, ok)
-	assert.True(t, task.Status == StatusFailed)
+	assert.True(t, task.Status == internal.StatusFailed)
 
 	task, ok = tasksStore.GetTask("hello-world.sh")
 	assert.True(t, ok)
-	assert.True(t, task.Status == StatusCompleted)
+	assert.True(t, task.Status == internal.StatusCompleted)
 }

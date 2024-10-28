@@ -11,8 +11,9 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-
 	"github.com/google/uuid"
+
+	"tuki/internal"
 
 	"github.com/go-git/go-billy/v5/memfs"
 	git "github.com/go-git/go-git/v5"
@@ -37,7 +38,7 @@ type State struct {
 	Repository *git.Repository
 	Worktree   *git.Worktree
 
-	TaskStore *TaskStore
+	TaskStore *internal.TaskStore
 }
 
 func main() {
@@ -137,11 +138,11 @@ func readStateFile(ctx context.Context) error {
 		return err
 	}
 	if os.IsNotExist(err) {
-		state.TaskStore = NewTaskStore()
+		state.TaskStore = internal.NewTaskStore()
 		return nil
 	}
 
-	state.TaskStore, err = LoadTaskStore(file)
+	state.TaskStore, err = internal.LoadTaskStore(file)
 	return err
 }
 
@@ -187,7 +188,7 @@ func updateTasksState(ctx context.Context) error {
 		}
 
 		if task.Status == "" {
-			task.Status = StatusPending
+			task.Status = internal.StatusPending
 		}
 
 		state.TaskStore.UpsertTask(task)
@@ -203,17 +204,17 @@ func processTasks(ctx context.Context) error {
 			return ctx.Err()
 		default:
 			switch task.Status {
-			case StatusPending:
+			case internal.StatusPending:
 				// Run
 				task := task
-				task.Status = StatusInProgress
+				task.Status = internal.StatusInProgress
 				task.LockedBy = state.WorkerUUID
 				task.InProgressAt = time.Now()
 				state.TaskStore.UpsertTask(task)
 
 				file, err := state.Worktree.Filesystem.Open("/" + task.Name)
 				if err != nil {
-					task.Status = StatusFailed
+					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to open file: %v", err)
 					state.TaskStore.UpsertTask(task)
 					continue
@@ -222,7 +223,7 @@ func processTasks(ctx context.Context) error {
 
 				contents, err := io.ReadAll(file)
 				if err != nil {
-					task.Status = StatusFailed
+					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to read file: %v", err)
 					state.TaskStore.UpsertTask(task)
 					continue
@@ -233,22 +234,22 @@ func processTasks(ctx context.Context) error {
 				cmd.Stdout = os.Stdout
 				err = cmd.Run()
 				if err != nil {
-					task.Status = StatusFailed
+					task.Status = internal.StatusFailed
 					task.ErrorMessage = fmt.Sprintf("Failed to run command: %v\n", err)
 					state.TaskStore.UpsertTask(task)
 					continue
 				}
 
-				task.Status = StatusCompleted
+				task.Status = internal.StatusCompleted
 				state.TaskStore.UpsertTask(task)
-			case StatusInProgress:
+			case internal.StatusInProgress:
 				if time.Since(task.InProgressAt) > time.Duration(config.InProgressTimeoutMinutes)*time.Minute {
-					task.Status = StatusFailed
+					task.Status = internal.StatusFailed
 					task.ErrorMessage = "Task in progress for more than an hour"
 					state.TaskStore.UpsertTask(task)
 				}
-			case StatusCompleted:
-			case StatusFailed:
+			case internal.StatusCompleted:
+			case internal.StatusFailed:
 				continue
 			}
 		}
