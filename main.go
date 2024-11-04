@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,11 +16,15 @@ import (
 
 	"tuki/internal"
 
-	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-billy/v5/osfs"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	log "github.com/sirupsen/logrus"
+)
+
+const (
+	DefaultTaskRunnerCommand = "env sh"
 )
 
 var (
@@ -165,7 +170,7 @@ func executeStep(ctx context.Context, name string, fn func(context.Context) erro
 }
 
 func readStateFile(ctx context.Context) error {
-	file, err := state.Worktree.Filesystem.Open("/" + config.StateFile)
+	file, err := state.Worktree.Filesystem.Open(path.Join(config.ScriptsDir, config.StateFile))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -180,7 +185,11 @@ func readStateFile(ctx context.Context) error {
 
 func cloneRepository(ctx context.Context) error {
 	storage := memory.NewStorage()
-	filesystem := memfs.New()
+	tempDir, err := os.MkdirTemp("", "tuki-clone")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	filesystem := osfs.New(tempDir)
 
 	log.Info("Cloning repository ", config.RepoURL)
 
@@ -263,6 +272,12 @@ func handleTaskError(task internal.Task, state *State, err error, errMsg string)
 }
 
 func processTasks(ctx context.Context) error {
+	taskRunnerCommand, err := determineTaskRunnerCommand()
+	if err != nil {
+		return err
+	}
+	log.Info("Using task runner command: ", taskRunnerCommand)
+
 	for _, task := range state.TaskStore.Tasks {
 		select {
 		case <-ctx.Done():
@@ -291,7 +306,9 @@ func processTasks(ctx context.Context) error {
 				}
 
 				log.Info("Running task ", task.Name)
-				cmd := exec.Command("sh", "-c", string(contents))
+				cmd := exec.Command(taskRunnerCommand[0], taskRunnerCommand[1:]...)
+				cmd.Dir = state.Worktree.Filesystem.Root()
+				cmd.Stdin = strings.NewReader(string(contents))
 				cmd.Stderr = &prefixWriter{prefix: task.Name, level: "ERROR"}
 				cmd.Stdout = &prefixWriter{prefix: task.Name, level: "INFO"}
 				if err := cmd.Run(); err != nil {
@@ -363,6 +380,23 @@ func persistStateFile(ctx context.Context) error {
 
 	return nil
 }
+
+func determineTaskRunnerCommand() ([]string, error) {
+	harnessFilePath := path.Join(config.ScriptsDir, config.HarnessFile)
+	if _, err := state.Worktree.Filesystem.Stat(harnessFilePath); os.IsNotExist(err) {
+		return strings.Split(DefaultTaskRunnerCommand, " "), nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to check harness file: %w", err)
+	} else {
+		fileInfo, err := state.Worktree.Filesystem.Stat(harnessFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat harness file: %w", err)
+		}
+		log.Infof("Harness file permissions: %s", fileInfo.Mode().Perm())
+		return []string{"./" + config.HarnessFile}, nil
+	}
+}
+
 
 type prefixWriter struct {
 	prefix string

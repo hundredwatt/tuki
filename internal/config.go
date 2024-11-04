@@ -20,6 +20,7 @@ type Config struct {
 	ScriptsDir               string
 	InProgressTimeoutMinutes int
 	StateFile                string
+	HarnessFile              string
 	TickIntervalSeconds      int
 	MaxTicks                 int
 	Verbose                  bool
@@ -32,6 +33,7 @@ func LoadConfig() *Config {
 		ScriptsDir:               getEnvOrDefault("SCRIPTS_DIR", "/"),
 		InProgressTimeoutMinutes: getEnvAsIntOrDefault("IN_PROGRESS_TIMEOUT_MINUTES", 60),
 		StateFile:                getEnvOrDefault("STATE_FILE", ".tuki/state.jsonl"),
+		HarnessFile:              getEnvOrDefault("HARNESS_FILE", ".tuki/harness.sh"),
 		TickIntervalSeconds:      getEnvAsIntOrDefault("TICK_INTERVAL_SECONDS", 60),
 		MaxTicks:                 getEnvAsIntOrDefault("MAX_TICKS", -1),
 		Verbose:                  getEnvAsBoolOrDefault("VERBOSE", false),
