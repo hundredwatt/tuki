@@ -54,36 +54,60 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	manualRunSignal := make(chan struct{})
+
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Info("Received shutdown signal. Cancelling operations...")
-		cancel()
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+		for {
+			sig := <-sigCh
+			if sig == syscall.SIGUSR1 && config.Mode == "Manual" {
+				log.Info("Received manual run signal (USR1).")
+				manualRunSignal <- struct{}{}
+			} else {
+				log.Info("Received shutdown signal. Cancelling operations...")
+				cancel()
+				return
+			}
+		}
 	}()
 
 	if err := setup(ctx); err != nil {
 		log.Fatal("Setup Error: ", err)
 	}
 
-	ticker := time.NewTicker(time.Duration(config.TickIntervalSeconds) * time.Second)
-	defer ticker.Stop()
+	// Channels for time based triggering in Periodic mode
+	var firstTick <-chan time.Time
+	var ticker <-chan time.Time
 
-	for {
+	if config.Mode == "Manual" {
+		firstTick = make(chan time.Time) // A nil channel that will never receive
+		ticker = make(chan time.Time)    // A nil channel that will never receive
+	} else {
+		firstTick = time.After(0) // Immediate first tick
+		ticker = time.Tick(time.Duration(config.TickIntervalSeconds) * time.Second)
+	}
+
+	run := func() {
 		if err := run(ctx); err != nil {
 			log.Fatal("Run Error: ", err)
 		}
 
-		if config.MaxTicks >= 0 && (state.RunNumber-1) >= config.MaxTicks {
+		if config.MaxTicks >= 0 && state.RunNumber >= config.MaxTicks {
 			cancel()
-			return
 		}
+	}
 
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			continue
+		case <-firstTick:
+			run()
+		case <-ticker:
+			run()
+		case <-manualRunSignal:
+			run()
 		}
 	}
 }
@@ -231,6 +255,13 @@ func updateTasksState(ctx context.Context) error {
 	return nil
 }
 
+func handleTaskError(task internal.Task, state *State, err error, errMsg string) {
+	log.WithError(err).Error("Task ", task.Name, " failed")
+	task.Status = internal.StatusFailed
+	task.ErrorMessage = fmt.Sprintf("%s: %v", errMsg, err)
+	state.TaskStore.UpsertTask(task)
+}
+
 func processTasks(ctx context.Context) error {
 	for _, task := range state.TaskStore.Tasks {
 		select {
@@ -248,22 +279,14 @@ func processTasks(ctx context.Context) error {
 
 				file, err := state.Worktree.Filesystem.Open(path.Join(config.ScriptsDir, task.Name))
 				if err != nil {
-					log.WithError(err).Error("Task ", task.Name, " failed")
-
-					task.Status = internal.StatusFailed
-					task.ErrorMessage = fmt.Sprintf("Failed to open file: %v", err)
-					state.TaskStore.UpsertTask(task)
+					handleTaskError(task, state, err, "Failed to open file")
 					continue
 				}
 				defer file.Close()
 
 				contents, err := io.ReadAll(file)
 				if err != nil {
-					log.WithError(err).Error("Task ", task.Name, " failed")
-
-					task.Status = internal.StatusFailed
-					task.ErrorMessage = fmt.Sprintf("Failed to read file: %v", err)
-					state.TaskStore.UpsertTask(task)
+					handleTaskError(task, state, err, "Failed to read file")
 					continue
 				}
 
@@ -271,14 +294,8 @@ func processTasks(ctx context.Context) error {
 				cmd := exec.Command("sh", "-c", string(contents))
 				cmd.Stderr = &prefixWriter{prefix: task.Name, level: "ERROR"}
 				cmd.Stdout = &prefixWriter{prefix: task.Name, level: "INFO"}
-				err = cmd.Run()
-				if err != nil {
-					log.WithError(err).Error("Task ", task.Name, " failed")
-
-					task.Status = internal.StatusFailed
-					task.ErrorMessage = fmt.Sprintf("Failed to run command: %v\n", err)
-					state.TaskStore.UpsertTask(task)
-
+				if err := cmd.Run(); err != nil {
+					handleTaskError(task, state, err, "Failed to run command")
 					continue
 				}
 
