@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-git/go-billy/v5/osfs"
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	log "github.com/sirupsen/logrus"
@@ -211,7 +212,13 @@ func cloneRepository(ctx context.Context) error {
 }
 
 func fetchRepository(ctx context.Context) error {
-	err := state.Repository.FetchContext(ctx, &git.FetchOptions{})
+	remote, err := state.Repository.Remote("origin")
+	if err != nil {
+		return fmt.Errorf("failed to get remote: %w", err)
+	}
+	err = remote.FetchContext(ctx, &git.FetchOptions{
+		Force: true,
+	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return fmt.Errorf("failed to fetch repository: %w", err)
 	}
@@ -220,14 +227,24 @@ func fetchRepository(ctx context.Context) error {
 		return nil
 	}
 
-	ref, err := state.Repository.Head()
+	refs, err := remote.List(&git.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get head: %w", err)
+		return fmt.Errorf("failed to list references: %w", err)
+	}
+	var firstNonZeroRef *plumbing.Reference
+	for _, ref := range refs {
+		if !ref.Hash().IsZero() {
+			firstNonZeroRef = ref
+			break
+		}
+	}
+	if firstNonZeroRef == nil {
+		return fmt.Errorf("no non-zero references found")
 	}
 
 	err = state.Worktree.Reset(&git.ResetOptions{
 		Mode:   git.HardReset,
-		Commit: ref.Hash(),
+		Commit: firstNonZeroRef.Hash(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to reset worktree: %w", err)
@@ -276,7 +293,6 @@ func processTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Info("Using task runner command: ", taskRunnerCommand)
 
 	for _, task := range state.TaskStore.Tasks {
 		select {
@@ -363,8 +379,8 @@ func persistStateFile(ctx context.Context) error {
 
 	_, err = state.Worktree.Commit("Update state file", &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Task Manager",
-			Email: "taskmanager@local",
+			Name:  "Tuki Bot",
+			Email: "bot@tuki",
 			When:  time.Now(),
 		},
 	})
@@ -385,18 +401,10 @@ func determineTaskRunnerCommand() ([]string, error) {
 	harnessFilePath := path.Join(config.ScriptsDir, config.HarnessFile)
 	if _, err := state.Worktree.Filesystem.Stat(harnessFilePath); os.IsNotExist(err) {
 		return strings.Split(DefaultTaskRunnerCommand, " "), nil
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to check harness file: %w", err)
-	} else {
-		fileInfo, err := state.Worktree.Filesystem.Stat(harnessFilePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stat harness file: %w", err)
-		}
-		log.Infof("Harness file permissions: %s", fileInfo.Mode().Perm())
-		return []string{"./" + config.HarnessFile}, nil
 	}
-}
 
+	return []string{"./" + config.HarnessFile}, nil
+}
 
 type prefixWriter struct {
 	prefix string
