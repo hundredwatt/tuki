@@ -67,7 +67,7 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 		for {
 			sig := <-sigCh
-			if sig == syscall.SIGUSR1 && config.Mode == "Manual" {
+			if sig == syscall.SIGUSR1 {
 				log.Info("Received manual run signal (USR1).")
 				manualRunSignal <- struct{}{}
 			} else {
@@ -86,12 +86,12 @@ func main() {
 	var firstTick <-chan time.Time
 	var ticker <-chan time.Time
 
-	if config.Mode == "Manual" {
-		firstTick = make(chan time.Time) // A nil channel that will never receive
-		ticker = make(chan time.Time)    // A nil channel that will never receive
-	} else {
+	if config.TickIntervalSeconds >= 0 {
 		firstTick = time.After(0) // Immediate first tick
 		ticker = time.Tick(time.Duration(config.TickIntervalSeconds) * time.Second)
+	} else {
+		firstTick = make(chan time.Time) // A nil channel that will never receive
+		ticker = make(chan time.Time)    // A nil channel that will never receive
 	}
 
 	run := func() {

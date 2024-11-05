@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -24,7 +23,6 @@ type Config struct {
 	TickIntervalSeconds      int
 	MaxTicks                 int
 	Verbose                  bool
-	Mode                     Mode
 }
 
 func LoadConfig() *Config {
@@ -37,7 +35,6 @@ func LoadConfig() *Config {
 		TickIntervalSeconds:      getEnvAsIntOrDefault("TICK_INTERVAL_SECONDS", 60),
 		MaxTicks:                 getEnvAsIntOrDefault("MAX_TICKS", -1),
 		Verbose:                  getEnvAsBoolOrDefault("VERBOSE", false),
-		Mode:                     getModeFromEnv("MODE", Periodic),
 	}
 }
 
@@ -75,18 +72,4 @@ func getEnvAsBoolOrDefault(key string, defaultValue bool) bool {
 		return defaultValue
 	}
 	return value == "true" || value == "t" || value == "1"
-}
-
-func getModeFromEnv(key string, defaultValue Mode) Mode {
-	value := strings.ToLower(os.Getenv(key))
-	switch value {
-	case "":
-		return defaultValue
-	case strings.ToLower(string(Manual)):
-		return Manual
-	case strings.ToLower(string(Periodic)):
-		return Periodic
-	default:
-		panic(fmt.Sprintf("Invalid mode: %s", value))
-	}
 }
