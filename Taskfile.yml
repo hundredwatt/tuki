@@ -1,0 +1,23 @@
+version: '3'
+
+vars:
+  DOCKER_IMAGE: registry-76.localcan.dev/tuki
+  VERSION: 'latest'
+
+tasks:
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./...
+      - go test -tags integration
+
+  build:
+    desc: Build the Docker image
+    cmds:
+      - docker build -t {{.DOCKER_IMAGE}}:{{.VERSION}} .
+
+  push:
+    desc: Push the Docker image to registry
+    deps: [build]
+    cmds:
+      - docker push {{.DOCKER_IMAGE}}:{{.VERSION}}
