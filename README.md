@@ -20,7 +20,7 @@ Tuki provides an alternative to running commands in your production REPL or cons
 
 ## Usage
 
-See docs [here](https://github.com/hundredwatt/tuki/tree/main/docs).
+See docs [here](https://github.com/hundredwatt/tuki/tree/master/docs).
 
 ## Contributing
 
